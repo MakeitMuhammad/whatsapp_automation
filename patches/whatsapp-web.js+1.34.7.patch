@@ -1,0 +1,54 @@
+diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
+index 800109e..76afd66 100644
+--- a/node_modules/whatsapp-web.js/src/Client.js
++++ b/node_modules/whatsapp-web.js/src/Client.js
+@@ -104,15 +104,48 @@ class Client extends EventEmitter {
+ 
+         this.currentIndexHtml = null;
+         this.lastLoggedOut = false;
++        this._injectQueue = null;
+ 
+         Util.setFfmpegPath(this.options.ffmpegPath);
+     }
+ 
++    /**
++     * Serialize inject across navigations and retry when the page reloads mid-inject.
++     */
++    async inject() {
++        this._injectQueue = (this._injectQueue || Promise.resolve())
++            .catch(() => {})
++            .then(() => this._injectWithRetries());
++        return this._injectQueue;
++    }
++
++    async _injectWithRetries() {
++        const maxAttempts = 6;
++        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
++            try {
++                await this._injectInner();
++                return;
++            } catch (e) {
++                const msg = String((e && e.message) || e || '');
++                const transient =
++                    /Execution context was destroyed|Target closed|Protocol error|detached Frame|Navigation|Frame was detached/i.test(
++                        msg,
++                    );
++                if (!transient || attempt === maxAttempts) {
++                    throw e;
++                }
++                await new Promise((r) =>
++                    setTimeout(r, Math.min(2000, 400 * attempt)),
++                );
++            }
++        }
++    }
++
+     /**
+      * Injection logic
+      * Private function
+      */
+-    async inject() {
++    async _injectInner() {
+         if (
+             this.options.authTimeoutMs === undefined ||
+             this.options.authTimeoutMs == 0

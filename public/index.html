@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WhatsApp Broadcast Manager</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="wa-qr-overlay" class="wa-qr-overlay hidden" aria-hidden="true">
+      <div class="wa-qr-card surface">
+        <p class="wa-qr-title">Scan this QR code in WhatsApp on your phone</p>
+        <img id="wa-qr-img" class="wa-qr-img" src="" alt="WhatsApp QR code" width="256" height="256" />
+      </div>
+    </div>
+
+    <div id="main-ui" class="main-ui">
+    <div class="app">
+      <nav class="tabs" role="tablist" aria-label="Main">
+        <button type="button" class="tab active" data-tab="contacts" role="tab" aria-selected="true">
+          Contacts
+        </button>
+        <button type="button" class="tab" data-tab="groups" role="tab" aria-selected="false">
+          Groups
+        </button>
+        <button type="button" class="tab" data-tab="send" role="tab" aria-selected="false">
+          Send
+        </button>
+      </nav>
+
+      <main class="main">
+        <section id="panel-contacts" class="panel active" role="tabpanel">
+          <div class="surface panel-inner">
+            <label class="field-label" for="contact-search">Search</label>
+            <input
+              id="contact-search"
+              type="search"
+              class="input"
+              placeholder="Name or phone…"
+              autocomplete="off"
+            />
+
+            <div id="contact-list" class="contact-list scroll-area"></div>
+
+            <div class="divider"></div>
+            <h2 class="section-title">Add contact</h2>
+            <form id="add-contact-form" class="stack">
+              <input id="add-name" type="text" class="input" placeholder="Name" required />
+              <input id="add-phone" type="text" class="input" placeholder="Phone" inputmode="tel" />
+              <button type="submit" class="btn btn-primary">Save</button>
+            </form>
+
+            <div class="row row-actions">
+              <input id="csv-input" type="file" accept=".csv,text/csv" class="visually-hidden" />
+              <button type="button" id="import-csv-btn" class="btn btn-secondary">Import CSV</button>
+              <button type="button" id="sync-wa-btn" class="btn btn-secondary">
+                <span class="btn-label">Sync from WhatsApp</span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section id="panel-groups" class="panel" role="tabpanel">
+          <div class="surface panel-inner">
+            <div class="row row-spread">
+              <h2 class="section-title nomargin">Groups</h2>
+              <button type="button" id="new-group-btn" class="btn btn-primary btn-sm">Create group</button>
+            </div>
+            <div id="group-list" class="group-list scroll-area"></div>
+          </div>
+        </section>
+
+        <section id="panel-send" class="panel" role="tabpanel">
+          <div class="surface panel-inner">
+            <div id="send-selection" class="send-selection"></div>
+            <label class="field-label" for="send-message">Message</label>
+            <textarea id="send-message" class="input textarea" rows="6" placeholder="Type your message…"></textarea>
+            <div class="char-count"><span id="char-count">0</span> characters</div>
+            <label class="field-label" for="send-delay">Delay between messages (seconds)</label>
+            <select id="send-delay" class="input">
+              <option value="2">2</option>
+              <option value="3" selected>3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+              <option value="6">6</option>
+              <option value="7">7</option>
+              <option value="8">8</option>
+              <option value="9">9</option>
+              <option value="10">10</option>
+            </select>
+            <button type="button" id="send-btn" class="btn btn-primary" disabled>Send to group</button>
+
+            <div id="send-progress" class="send-progress hidden" aria-live="polite">
+              <p id="send-progress-text" class="send-progress-text"></p>
+              <div class="progress-track">
+                <div id="send-progress-fill" class="progress-fill"></div>
+              </div>
+              <button type="button" id="send-stop-btn" class="btn btn-secondary">Stop</button>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    </div>
+
+    <div id="group-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="group-modal-title">
+      <div class="modal-backdrop" data-modal-close></div>
+      <div class="modal-card surface">
+        <h2 id="group-modal-title" class="modal-title">Create group</h2>
+        <label class="field-label" for="group-modal-search">Search contacts</label>
+        <input
+          id="group-modal-search"
+          type="search"
+          class="input"
+          placeholder="Name starts with…"
+          autocomplete="off"
+          disabled
+        />
+        <p id="group-modal-hint" class="modal-hint"></p>
+        <label class="field-label" for="group-modal-name">Group name</label>
+        <input id="group-modal-name" type="text" class="input" placeholder="Group name" />
+        <p class="field-label nomargin">Members</p>
+        <div id="group-modal-contacts" class="modal-checklist scroll-area"></div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" data-modal-close>Cancel</button>
+          <button type="button" id="group-modal-save" class="btn btn-primary">Create group</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
