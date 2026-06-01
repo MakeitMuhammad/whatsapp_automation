@@ -147,6 +147,41 @@ function digitsOnly(str) {
   return String(str || "").replace(/\D/g, "");
 }
 
+function phoneKeyFromJid(id) {
+  const s = String(id || "");
+  const base = s.includes("@") ? s.split("@")[0] : s;
+  return digitsOnly(base) || null;
+}
+
+/** Drop duplicate phone numbers; keeps first occurrence in contactIds. */
+function dedupeGroupContactIds(contactIds, { fromWhatsApp, contacts }) {
+  const ids = Array.isArray(contactIds) ? contactIds : [];
+  const seen = new Set();
+  const out = [];
+
+  if (fromWhatsApp) {
+    for (const id of ids) {
+      if (!id) continue;
+      const key = phoneKeyFromJid(id);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(id);
+    }
+    return out;
+  }
+
+  const byId = new Map((Array.isArray(contacts) ? contacts : []).map((c) => [c.id, c]));
+  for (const id of ids) {
+    if (!id) continue;
+    const contact = byId.get(id);
+    const key = contact ? digitsOnly(contact.phone) : "";
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(id);
+  }
+  return out;
+}
+
 /** Strip @c.us / @s.whatsapp.net suffix; keep digits for matching/storage. */
 function phoneFromSerializedOrNumber(serialized, numberField) {
   const s = String(serialized || "");
@@ -230,7 +265,10 @@ async function syncFromWhatsApp() {
         waById.set(chat.id._serialized, {
           id: chat.id._serialized,
           name: chat.name,
-          contactIds,
+          contactIds: dedupeGroupContactIds(contactIds, {
+            fromWhatsApp: true,
+            contacts: [],
+          }),
           fromWhatsApp: true,
         });
       }
@@ -373,11 +411,15 @@ app.post("/api/groups", async (req, res) => {
     return res.status(400).json({ error: "Name is required" });
   }
   try {
+    const contacts = await readJSON("contacts.json");
     const groups = await readJSON("groups.json");
     const group = {
       id: crypto.randomUUID(),
       name,
-      contactIds: Array.isArray(contactIds) ? contactIds : [],
+      contactIds: dedupeGroupContactIds(contactIds, {
+        fromWhatsApp: false,
+        contacts,
+      }),
       fromWhatsApp: false,
     };
     groups.push(group);
@@ -400,15 +442,20 @@ app.put("/api/groups/:id", async (req, res) => {
       return res.status(400).json({ error: "WhatsApp groups cannot be edited here" });
     }
     const { name, contactIds } = req.body;
+    const rawIds =
+      contactIds !== undefined
+        ? Array.isArray(contactIds)
+          ? contactIds
+          : []
+        : prev.contactIds || [];
+    const contacts = await readJSON("contacts.json");
     const group = {
       id: req.params.id,
       name: name !== undefined ? name : prev.name,
-      contactIds:
-        contactIds !== undefined
-          ? Array.isArray(contactIds)
-            ? contactIds
-            : []
-          : prev.contactIds || [],
+      contactIds: dedupeGroupContactIds(rawIds, {
+        fromWhatsApp: false,
+        contacts,
+      }),
       fromWhatsApp: false,
     };
     groups[idx] = group;
@@ -489,7 +536,10 @@ app.post("/api/send", async (req, res) => {
     return res.status(400).json({ error: "WhatsApp not connected" });
   }
 
-  const contactIds = Array.isArray(group.contactIds) ? group.contactIds : [];
+  const contactIds = dedupeGroupContactIds(group.contactIds, {
+    fromWhatsApp: group.fromWhatsApp === true,
+    contacts,
+  });
   /** @type {{ name: string, sendJid: string }[]} */
   let toSend = [];
 

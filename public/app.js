@@ -320,9 +320,58 @@
       .join("");
   }
 
+  function uniquePhoneKeysForGroup(group) {
+    const ids = group.contactIds || [];
+    const seen = new Set();
+    const keys = [];
+    if (group.fromWhatsApp === true) {
+      for (const id of ids) {
+        const s = String(id || "");
+        const key = digitsOnly(s.includes("@") ? s.split("@")[0] : s);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        keys.push(key);
+      }
+      return keys;
+    }
+    const byId = new Map(contacts.map((c) => [c.id, c]));
+    for (const id of ids) {
+      const c = byId.get(id);
+      const key = c ? digitsOnly(c.phone) : "";
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      keys.push(key);
+    }
+    return keys;
+  }
+
+  function memberCountForGroup(group) {
+    return uniquePhoneKeysForGroup(group).length;
+  }
+
   function memberNamesForGroup(group) {
     const ids = group.contactIds || [];
-    return ids.map((id) => displayParticipantName(id));
+    const seen = new Set();
+    const names = [];
+    if (group.fromWhatsApp === true) {
+      for (const id of ids) {
+        const s = String(id || "");
+        const key = digitsOnly(s.includes("@") ? s.split("@")[0] : s);
+        if (!key || seen.has(key)) continue;
+        seen.add(key);
+        names.push(displayParticipantName(id));
+      }
+      return names;
+    }
+    const byId = new Map(contacts.map((c) => [c.id, c]));
+    for (const id of ids) {
+      const c = byId.get(id);
+      const key = c ? digitsOnly(c.phone) : "";
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      names.push(c ? c.name : displayParticipantName(id));
+    }
+    return names;
   }
 
   function renderGroups() {
@@ -337,7 +386,7 @@
     }
     els.groupList.innerHTML = list
       .map((g) => {
-        const count = (g.contactIds || []).length;
+        const count = memberCountForGroup(g);
         const expanded = expandedGroupId === g.id;
         const names = memberNamesForGroup(g);
         const membersHtml =
@@ -387,7 +436,7 @@
       els.sendSelection.innerHTML = "<span>No group selected.</span> Go to <strong>Groups</strong> and tap <strong>Select</strong> on a group.";
       return;
     }
-    const n = (selectedGroup.contactIds || []).length;
+    const n = memberCountForGroup(selectedGroup);
     els.sendSelection.innerHTML = `Sending to <strong>${escapeHtml(selectedGroup.name)}</strong> — <strong>${n}</strong> recipient${n === 1 ? "" : "s"}.`;
   }
 
@@ -501,8 +550,17 @@
   function getModalSelectedContactIds() {
     const boxes = els.groupModalContacts.querySelectorAll('input[type="checkbox"][data-contact-id]');
     const ids = [];
+    const seenPhones = new Set();
+    const byId = new Map(contacts.map((c) => [c.id, c]));
     boxes.forEach((input) => {
-      if (input.checked) ids.push(input.getAttribute("data-contact-id"));
+      if (!input.checked) return;
+      const id = input.getAttribute("data-contact-id");
+      if (!id) return;
+      const c = byId.get(id);
+      const phone = c ? digitsOnly(c.phone) : "";
+      if (phone && seenPhones.has(phone)) return;
+      if (phone) seenPhones.add(phone);
+      ids.push(id);
     });
     return ids;
   }
