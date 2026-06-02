@@ -10,6 +10,9 @@ const PORT = 3000;
 
 let qrDataUrl = null;
 let waReady = false;
+/** @type {'starting'|'qr'|'authenticated'|'ready'|'failed'} */
+let waState = "starting";
+let waLastError = null;
 let isStopped = false;
 
 const broadcastProgress = {
@@ -36,38 +39,60 @@ const winChromeUserAgent =
 const client = new Client({
   authStrategy: new LocalAuth(),
   puppeteer: {
-    args: [`--user-agent=${winChromeUserAgent}`],
-    protocolTimeout: 120000,
+    headless: true,
+    args: [
+      `--user-agent=${winChromeUserAgent}`,
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+    ],
+    protocolTimeout: 180000,
   },
   waitForInitialPage: false,
-  authTimeoutMs: 60000,
+  authTimeoutMs: 120000,
 });
 
 client.on("qr", async (qr) => {
+  waState = "qr";
+  waLastError = null;
   try {
     qrDataUrl = await QRCode.toDataURL(qr);
+    console.log("WhatsApp QR ready — open http://localhost:3000 to scan");
   } catch (err) {
     console.error(err);
     qrDataUrl = null;
   }
 });
 
-/** Phone has scanned the QR; hide QR in the UI before `ready` (which can take a while). */
 client.on("authenticated", () => {
+  waState = "authenticated";
   qrDataUrl = null;
-  console.log("WhatsApp authenticated (QR cleared for UI)");
+  console.log("WhatsApp authenticated — finishing setup…");
 });
 
 client.on("ready", () => {
   waReady = true;
+  waState = "ready";
+  waLastError = null;
   qrDataUrl = null;
   console.log("WhatsApp ready");
   void syncFromWhatsApp().catch((err) => console.error("Sync failed:", err));
 });
 
-client.on("disconnected", () => {
+client.on("auth_failure", (msg) => {
   waReady = false;
-  console.log("WhatsApp disconnected");
+  waState = "failed";
+  waLastError =
+    typeof msg === "string" && msg.trim() ? msg.trim() : "Authentication failed";
+  qrDataUrl = null;
+  console.error("WhatsApp auth_failure:", waLastError);
+});
+
+client.on("disconnected", (reason) => {
+  waReady = false;
+  waState = "starting";
+  qrDataUrl = null;
+  console.log("WhatsApp disconnected:", reason || "");
 });
 
 const DATA_DIR = path.join(__dirname, "data");
@@ -91,7 +116,11 @@ async function clearWWebJsCache() {
  * only safe to remove while the browser is not using those files.)
  */
 async function startWhatsAppClient() {
-  await clearWWebJsCache();
+  waState = "starting";
+  waLastError = null;
+  if (process.env.CLEAR_WWEBJS_CACHE === "1") {
+    await clearWWebJsCache();
+  }
   const maxAttempts = 3;
   const delayMs = 3000;
   let lastErr;
@@ -118,6 +147,9 @@ async function startWhatsAppClient() {
       }
     }
   }
+  waState = "failed";
+  waLastError =
+    lastErr && lastErr.message ? lastErr.message : "WhatsApp client failed to start";
   console.error("WhatsApp client failed to start after all retries.");
   throw lastErr;
 }
@@ -137,6 +169,25 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function parseDelayRangeSeconds(raw) {
+  const s = String(raw || "").trim();
+  const m = /^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)$/.exec(s);
+  if (!m) return null;
+  const min = Number(m[1]);
+  const max = Number(m[2]);
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max < min) {
+    return null;
+  }
+  return { min, max };
+}
+
+function randomDelayMsFromRange(rangeSeconds) {
+  const minMs = rangeSeconds.min * 1000;
+  const maxMs = rangeSeconds.max * 1000;
+  const ms = minMs + Math.random() * (maxMs - minMs);
+  return Math.max(2500, Math.round(ms));
+}
+
 async function prependHistoryEntry(entry) {
   const history = await readJSON("history.json");
   const next = [entry, ...history].slice(0, 50);
@@ -147,55 +198,89 @@ function digitsOnly(str) {
   return String(str || "").replace(/\D/g, "");
 }
 
-function phoneKeyFromJid(id) {
-  const s = String(id || "");
-  const base = s.includes("@") ? s.split("@")[0] : s;
-  return digitsOnly(base) || null;
-}
-
-/** Drop duplicate phone numbers; keeps first occurrence in contactIds. */
-function dedupeGroupContactIds(contactIds, { fromWhatsApp, contacts }) {
-  const ids = Array.isArray(contactIds) ? contactIds : [];
-  const seen = new Set();
-  const out = [];
-
-  if (fromWhatsApp) {
-    for (const id of ids) {
-      if (!id) continue;
-      const key = phoneKeyFromJid(id);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push(id);
-    }
-    return out;
-  }
-
-  const byId = new Map((Array.isArray(contacts) ? contacts : []).map((c) => [c.id, c]));
-  for (const id of ids) {
-    if (!id) continue;
-    const contact = byId.get(id);
-    const key = contact ? digitsOnly(contact.phone) : "";
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(id);
-  }
-  return out;
-}
-
 /** Strip @c.us / @s.whatsapp.net suffix; keep digits for matching/storage. */
 function phoneFromSerializedOrNumber(serialized, numberField) {
   const s = String(serialized || "");
-  const base = s.includes("@") ? s.split("@")[0] : s;
-  const fromNum = String(numberField || "").replace(/@c\.us$/i, "");
-  const digits = digitsOnly(fromNum || base);
-  return digits || null;
+  const at = s.indexOf("@");
+  const base = at >= 0 ? s.slice(0, at) : s;
+  const suffix = at >= 0 ? s.slice(at + 1).toLowerCase() : "";
+  const fromSerialized = digitsOnly(base);
+  const fromNum = digitsOnly(String(numberField || "").replace(/@c\.us$/i, ""));
+
+  // WhatsApp's `number` field can be a LID; prefer the @c.us JID from serialized id.
+  if (
+    (suffix === "c.us" || suffix === "s.whatsapp.net") &&
+    fromSerialized
+  ) {
+    return fromSerialized;
+  }
+  return fromNum || fromSerialized || null;
 }
 
-function participantSerializedId(p) {
-  if (!p || !p.id) return null;
-  if (typeof p.id === "string") return p.id;
-  if (p.id._serialized) return p.id._serialized;
-  return null;
+/** Phone digits for display/dedupe; prefer @c.us id over a stale LID in `phone`. */
+function contactPhoneDigits(contact) {
+  if (!contact) return "";
+  const id = String(contact.id || "");
+  const at = id.indexOf("@");
+  if (at > 0) {
+    const suffix = id.slice(at + 1).toLowerCase();
+    if (suffix === "c.us" || suffix === "s.whatsapp.net") {
+      return digitsOnly(id.slice(0, at));
+    }
+  }
+  return digitsOnly(contact.phone);
+}
+
+/** JID to pass to sendMessage. */
+function sendJidForContact(contact) {
+  if (!contact) return null;
+  const id = String(contact.id || "").trim();
+  if (/@(c\.us|lid|s\.whatsapp\.net)$/i.test(id)) {
+    return id;
+  }
+  const phone = contactPhoneDigits(contact);
+  if (!phone) return null;
+  return `${phone}@c.us`;
+}
+
+function repairContactPhone(row) {
+  if (!row || typeof row !== "object") return row;
+  const id = String(row.id || "");
+  if (!/@c\.us$/i.test(id)) return row;
+  const fromId = digitsOnly(id.split("@")[0]);
+  if (!fromId) return row;
+  if (digitsOnly(row.phone) !== fromId) {
+    return { ...row, phone: fromId };
+  }
+  return row;
+}
+
+/** Dedupe group members by normalized phone; keeps first occurrence. */
+function dedupeGroupContactIds(contactIds, contacts) {
+  if (!Array.isArray(contactIds)) return [];
+  const byContactId = new Map((contacts || []).map((c) => [c.id, c]));
+  const seenPhones = new Set();
+  const seenIds = new Set();
+  const out = [];
+  for (const raw of contactIds) {
+    if (raw == null || raw === "") continue;
+    const id = String(raw);
+    if (seenIds.has(id)) continue;
+    let phoneKey;
+    if (id.includes("@")) {
+      phoneKey = digitsOnly(id.split("@")[0]);
+    } else {
+      const c = byContactId.get(id);
+      phoneKey = c ? contactPhoneDigits(c) : "";
+    }
+    if (phoneKey) {
+      if (seenPhones.has(phoneKey)) continue;
+      seenPhones.add(phoneKey);
+    }
+    seenIds.add(id);
+    out.push(id);
+  }
+  return out;
 }
 
 /** Single-flight: concurrent callers await the same sync. */
@@ -238,7 +323,7 @@ async function syncFromWhatsApp() {
         });
       }
 
-      const mergedContacts = [...manualOnly, ...waAdds];
+      const mergedContacts = [...manualOnly, ...waAdds].map(repairContactPhone);
       await writeJSON("contacts.json", mergedContacts);
       console.log(`Synced ${phoneBookContacts.length} contacts from WhatsApp`);
     } catch (err) {
@@ -246,46 +331,27 @@ async function syncFromWhatsApp() {
     }
 
     try {
-      const chats = await client.getChats();
-      const groupChats = (Array.isArray(chats) ? chats : []).filter((ch) => ch && ch.isGroup === true);
-      const waGroupRows = groupChats.length;
-
       const existingGroups = await readJSON("groups.json");
-      const manualGroups = existingGroups.filter((g) => g.fromWhatsApp !== true);
-      const waById = new Map();
-
-      for (const chat of groupChats) {
-        if (!chat.id || !chat.id._serialized || !chat.name) continue;
-        const contactIds = [];
-        const parts = chat.participants || [];
-        for (const p of parts) {
-          const sid = participantSerializedId(p);
-          if (sid) contactIds.push(sid);
-        }
-        waById.set(chat.id._serialized, {
-          id: chat.id._serialized,
-          name: chat.name,
-          contactIds: dedupeGroupContactIds(contactIds, {
-            fromWhatsApp: true,
-            contacts: [],
-          }),
-          fromWhatsApp: true,
-        });
+      const manualGroups = existingGroups.filter((g) => g && g.fromWhatsApp !== true);
+      if (manualGroups.length !== existingGroups.length) {
+        await writeJSON("groups.json", manualGroups);
+        console.log(
+          `Removed ${existingGroups.length - manualGroups.length} WhatsApp chat groups from storage (tool groups only)`
+        );
       }
-
-      const mergedGroups = [...manualGroups, ...waById.values()];
-      await writeJSON("groups.json", mergedGroups);
-      console.log(`Synced ${waGroupRows} groups from WhatsApp`);
     } catch (err) {
-      console.error("WhatsApp group sync error:", err);
+      console.error("Groups cleanup error:", err);
     }
 
     try {
       const contactsOut = await readJSON("contacts.json");
       const groupsOut = await readJSON("groups.json");
+      const toolGroups = Array.isArray(groupsOut)
+        ? groupsOut.filter((g) => g && g.fromWhatsApp !== true)
+        : [];
       return {
         contacts: Array.isArray(contactsOut) ? contactsOut.length : 0,
-        groups: Array.isArray(groupsOut) ? groupsOut.length : 0,
+        groups: toolGroups.length,
       };
     } catch (err) {
       console.error("Sync read-back error:", err);
@@ -314,13 +380,17 @@ app.get("/api/status", async (req, res) => {
     const contacts = await readJSON("contacts.json");
     const groups = await readJSON("groups.json");
     contactCount = Array.isArray(contacts) ? contacts.length : 0;
-    groupCount = Array.isArray(groups) ? groups.length : 0;
+    groupCount = Array.isArray(groups)
+      ? groups.filter((g) => g && g.fromWhatsApp !== true).length
+      : 0;
   } catch (_) {
     /* use zeros */
   }
   res.json({
     ready: waReady,
+    state: waState,
     qr: waReady ? null : qrDataUrl,
+    error: waState === "failed" ? waLastError : null,
     contactCount,
     groupCount,
   });
@@ -336,6 +406,56 @@ app.post("/api/sync", async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Sync failed" });
+  }
+});
+
+app.post("/api/cache/clear", async (req, res) => {
+  try {
+    await clearWWebJsCache();
+    res.json({
+      ok: true,
+      message: "WhatsApp Web cache cleared. Restart the server (npm start) before syncing again.",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to clear cache" });
+  }
+});
+
+app.post("/api/contacts/clear-synced", async (req, res) => {
+  if (broadcastProgress.active) {
+    return res.status(400).json({ error: "Cannot clear contacts while a broadcast is running" });
+  }
+  try {
+    const contacts = await readJSON("contacts.json");
+    const list = Array.isArray(contacts) ? contacts : [];
+    const removedIds = new Set(
+      list.filter((c) => c && c.fromWhatsApp === true).map((c) => String(c.id))
+    );
+    const remaining = list.filter((c) => !c || c.fromWhatsApp !== true);
+    const removed = list.length - remaining.length;
+
+    await writeJSON("contacts.json", remaining);
+
+    let groupsPruned = 0;
+    try {
+      const groups = await readJSON("groups.json");
+      const nextGroups = (Array.isArray(groups) ? groups : []).map((g) => {
+        if (!g || !Array.isArray(g.contactIds)) return g;
+        const before = g.contactIds.length;
+        const contactIds = g.contactIds.filter((id) => !removedIds.has(String(id)));
+        if (contactIds.length !== before) groupsPruned += 1;
+        return { ...g, contactIds };
+      });
+      await writeJSON("groups.json", nextGroups);
+    } catch (groupsErr) {
+      console.error("Groups update after clear-synced:", groupsErr);
+    }
+
+    res.json({ ok: true, removed, groupsPruned });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to clear synced contacts" });
   }
 });
 
@@ -399,7 +519,7 @@ app.delete("/api/contacts/:id", async (req, res) => {
 app.get("/api/groups", async (req, res) => {
   try {
     const groups = await readJSON("groups.json");
-    res.json(groups);
+    res.json(groups.filter((g) => g && g.fromWhatsApp !== true));
   } catch (err) {
     res.status(500).json({ error: "Failed to read groups" });
   }
@@ -411,15 +531,17 @@ app.post("/api/groups", async (req, res) => {
     return res.status(400).json({ error: "Name is required" });
   }
   try {
-    const contacts = await readJSON("contacts.json");
-    const groups = await readJSON("groups.json");
+    const [groups, contacts] = await Promise.all([
+      readJSON("groups.json"),
+      readJSON("contacts.json"),
+    ]);
     const group = {
       id: crypto.randomUUID(),
       name,
-      contactIds: dedupeGroupContactIds(contactIds, {
-        fromWhatsApp: false,
-        contacts,
-      }),
+      contactIds: dedupeGroupContactIds(
+        Array.isArray(contactIds) ? contactIds : [],
+        contacts
+      ),
       fromWhatsApp: false,
     };
     groups.push(group);
@@ -442,20 +564,17 @@ app.put("/api/groups/:id", async (req, res) => {
       return res.status(400).json({ error: "WhatsApp groups cannot be edited here" });
     }
     const { name, contactIds } = req.body;
+    const contacts = await readJSON("contacts.json");
     const rawIds =
       contactIds !== undefined
         ? Array.isArray(contactIds)
           ? contactIds
           : []
         : prev.contactIds || [];
-    const contacts = await readJSON("contacts.json");
     const group = {
       id: req.params.id,
       name: name !== undefined ? name : prev.name,
-      contactIds: dedupeGroupContactIds(rawIds, {
-        fromWhatsApp: false,
-        contacts,
-      }),
+      contactIds: dedupeGroupContactIds(rawIds, contacts),
       fromWhatsApp: false,
     };
     groups[idx] = group;
@@ -502,7 +621,7 @@ app.post("/api/send/stop", (req, res) => {
 app.post("/api/send", async (req, res) => {
   resetBroadcastProgress();
 
-  const { groupId, message, delaySeconds } = req.body;
+  const { groupId, message, delayRange } = req.body;
 
   if (groupId == null || String(groupId).trim() === "") {
     return res.status(400).json({ error: "groupId is required" });
@@ -513,16 +632,32 @@ app.post("/api/send", async (req, res) => {
     return res.status(400).json({ error: "Message cannot be empty" });
   }
 
-  const delay = Number(delaySeconds);
-  if (!Number.isFinite(delay) || delay < 2 || delay > 10) {
-    return res.status(400).json({ error: "delaySeconds must be between 2 and 10" });
+  const allowedRanges = new Set(["10-15", "15-20", "20-30", "30-45"]);
+  const selectedRange = String(delayRange || "").trim();
+  if (!allowedRanges.has(selectedRange)) {
+    return res
+      .status(400)
+      .json({ error: "delayRange must be one of: 10-15, 15-20, 20-30, 30-45" });
+  }
+  const delayRangeSeconds = parseDelayRangeSeconds(selectedRange);
+  if (!delayRangeSeconds) {
+    return res.status(400).json({ error: "Invalid delayRange format" });
   }
 
   let groups;
   let contacts;
   try {
     groups = await readJSON("groups.json");
-    contacts = await readJSON("contacts.json");
+    const rawContacts = await readJSON("contacts.json");
+    let contactsNeedSave = false;
+    contacts = rawContacts.map((row) => {
+      const fixed = repairContactPhone(row);
+      if (fixed !== row) contactsNeedSave = true;
+      return fixed;
+    });
+    if (contactsNeedSave) {
+      await writeJSON("contacts.json", contacts);
+    }
   } catch (err) {
     return res.status(500).json({ error: "Failed to read data" });
   }
@@ -531,47 +666,36 @@ app.post("/api/send", async (req, res) => {
   if (!group) {
     return res.status(400).json({ error: "Group not found" });
   }
+  if (group.fromWhatsApp === true) {
+    return res.status(400).json({ error: "Only groups created in this tool can be used for sending" });
+  }
 
   if (!waReady) {
     return res.status(400).json({ error: "WhatsApp not connected" });
   }
 
-  const contactIds = dedupeGroupContactIds(group.contactIds, {
-    fromWhatsApp: group.fromWhatsApp === true,
-    contacts,
-  });
+  const contactIds = Array.isArray(group.contactIds) ? group.contactIds : [];
   /** @type {{ name: string, sendJid: string }[]} */
   let toSend = [];
 
-  if (group.fromWhatsApp === true) {
-    for (const jid of contactIds) {
-      if (!jid) continue;
-      const j = String(jid);
-      const sendJid = /@/.test(j) ? j : `${digitsOnly(j)}@c.us`;
-      toSend.push({
-        name: j.includes("@") ? j.split("@")[0] : digitsOnly(j) || j,
-        sendJid,
-      });
-    }
-  } else {
-    const byId = new Map(contacts.map((c) => [c.id, c]));
-    for (const id of contactIds) {
-      const contact = byId.get(id);
-      if (!contact) continue;
-      const phone = digitsOnly(contact.phone);
-      if (!phone) continue;
-      toSend.push({
-        name: contact.name || phone,
-        sendJid: `${phone}@c.us`,
-      });
-    }
+  const seenSendJids = new Set();
+  const byId = new Map(contacts.map((c) => [c.id, c]));
+  for (const id of contactIds) {
+    const contact = byId.get(id);
+    if (!contact) continue;
+    const sendJid = sendJidForContact(contact);
+    if (!sendJid) continue;
+    if (seenSendJids.has(sendJid)) continue;
+    seenSendJids.add(sendJid);
+    const phone = contactPhoneDigits(contact);
+    toSend.push({
+      name: contact.name || phone || sendJid,
+      sendJid,
+    });
   }
 
   isStopped = false;
   let sent = 0;
-  const delayMs = delay * 1000;
-  /** Never send faster than ~2.5s apart to reduce protocol / WA overload. */
-  const interMessageMs = Math.max(2500, delayMs);
   const totalRecipients = toSend.length;
 
   broadcastProgress.active = true;
@@ -607,7 +731,12 @@ app.post("/api/send", async (req, res) => {
       if (isStopped) {
         break;
       }
-      await sleep(interMessageMs);
+      if (i + 1 < toSend.length) {
+        const interMessageMs = randomDelayMsFromRange(delayRangeSeconds);
+        const shownSeconds = (interMessageMs / 1000).toFixed(1);
+        console.log(`Waiting ${shownSeconds}s before next message`);
+        await sleep(interMessageMs);
+      }
     }
 
     await prependHistoryEntry({
@@ -635,5 +764,9 @@ app.listen(PORT, () => {
 });
 
 startWhatsAppClient().catch((err) => {
+  if (waState !== "failed") {
+    waState = "failed";
+    waLastError = err && err.message ? err.message : "WhatsApp client failed to start";
+  }
   console.error("WhatsApp client failed to start:", err);
 });

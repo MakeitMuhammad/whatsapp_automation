@@ -25,9 +25,6 @@
   let lastWaReady = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let toastTimer = null;
-  /** @type {Set<string>} */
-  let groupModalLastVisibleIds = new Set();
-  let groupModalSearchHadQuery = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
   let groupModalSearchTimer = null;
   let groupModalSearchSeq = 0;
@@ -35,6 +32,9 @@
   const els = {
     mainUi: document.getElementById("main-ui"),
     waQrOverlay: document.getElementById("wa-qr-overlay"),
+    waQrTitle: document.getElementById("wa-qr-title"),
+    waQrHint: document.getElementById("wa-qr-hint"),
+    waQrSpinner: document.getElementById("wa-qr-spinner"),
     waQrImg: document.getElementById("wa-qr-img"),
     tabs: document.querySelectorAll(".tab"),
     panelContacts: document.getElementById("panel-contacts"),
@@ -47,6 +47,8 @@
     addPhone: document.getElementById("add-phone"),
     importCsvBtn: document.getElementById("import-csv-btn"),
     syncWaBtn: document.getElementById("sync-wa-btn"),
+    clearCacheBtn: document.getElementById("clear-cache-btn"),
+    clearSyncedContactsBtn: document.getElementById("clear-synced-contacts-btn"),
     csvInput: document.getElementById("csv-input"),
     groupList: document.getElementById("group-list"),
     newGroupBtn: document.getElementById("new-group-btn"),
@@ -56,6 +58,7 @@
     groupModalContacts: document.getElementById("group-modal-contacts"),
     groupModalSave: document.getElementById("group-modal-save"),
     groupModalSearch: document.getElementById("group-modal-search"),
+    groupModalSelectAll: document.getElementById("group-modal-select-all"),
     groupModalHint: document.getElementById("group-modal-hint"),
     sendSelection: document.getElementById("send-selection"),
     sendMessage: document.getElementById("send-message"),
@@ -71,6 +74,21 @@
 
   function digitsOnly(str) {
     return String(str || "").replace(/\D/g, "");
+  }
+
+  /** One row per phone so duplicate contacts cannot be added to a group twice. */
+  function contactsUniqueByPhone(list) {
+    const seen = new Set();
+    const out = [];
+    for (const c of list) {
+      const phoneKey = digitsOnly(c && c.phone);
+      if (phoneKey) {
+        if (seen.has(phoneKey)) continue;
+        seen.add(phoneKey);
+      }
+      out.push(c);
+    }
+    return out;
   }
 
   function isValidPhoneDigits(d) {
@@ -122,7 +140,7 @@
       const r = await apiJson("/api/sync", { method: "POST" });
       const c = typeof r.contacts === "number" ? r.contacts : 0;
       const g = typeof r.groups === "number" ? r.groups : 0;
-      showToast(`Synced ${c} contacts and ${g} groups`, "info");
+      showToast(`Synced ${c} contacts (${g} tool group${g === 1 ? "" : "s"})`, "info");
       await refreshAll();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Sync failed", "error");
@@ -203,6 +221,22 @@
     }, 150);
   }
 
+  function waConnectMessage(s) {
+    if (s.state === "failed") {
+      return (
+        (typeof s.error === "string" && s.error.trim()) ||
+        "WhatsApp failed to start. Stop the server, then run npm start again."
+      );
+    }
+    if (s.state === "authenticated") {
+      return "Phone linked — finishing setup (this can take a minute)…";
+    }
+    if (s.qr) {
+      return "Scan this QR code in WhatsApp on your phone";
+    }
+    return "Starting WhatsApp — QR code will appear shortly…";
+  }
+
   /**
    * @returns {Promise<boolean>} true if WhatsApp is ready
    */
@@ -231,30 +265,45 @@
     }
 
     lastWaReady = false;
+    els.waQrOverlay.classList.remove("hidden");
+    els.waQrOverlay.setAttribute("aria-hidden", "false");
+    els.mainUi.classList.add("main-ui-hidden");
+
+    if (els.waQrTitle) {
+      els.waQrTitle.textContent = waConnectMessage(s);
+    }
+    if (els.waQrHint) {
+      els.waQrHint.hidden = s.state === "failed";
+    }
     if (s.qr) {
       els.waQrImg.src = s.qr;
-      els.waQrOverlay.classList.remove("hidden");
-      els.waQrOverlay.setAttribute("aria-hidden", "false");
-      els.mainUi.classList.add("main-ui-hidden");
+      els.waQrImg.classList.remove("hidden");
+      if (els.waQrSpinner) els.waQrSpinner.classList.add("hidden");
     } else {
-      els.waQrOverlay.classList.add("hidden");
-      els.waQrOverlay.setAttribute("aria-hidden", "true");
-      els.mainUi.classList.remove("main-ui-hidden");
+      els.waQrImg.classList.add("hidden");
+      if (els.waQrSpinner) {
+        els.waQrSpinner.classList.toggle("hidden", s.state === "failed");
+      }
     }
     return false;
   }
 
   async function initWaConnection() {
+    els.mainUi.classList.add("main-ui-hidden");
     try {
       const ready = await syncWaOverlay();
       if (ready) return;
     } catch {
-      els.mainUi.classList.remove("main-ui-hidden");
+      if (els.waQrTitle) {
+        els.waQrTitle.textContent =
+          "Cannot reach the server. Run npm start, then open http://localhost:3000";
+      }
+      if (els.waQrSpinner) els.waQrSpinner.classList.add("hidden");
     }
     if (waStatusTimer === null) {
       waStatusTimer = setInterval(() => {
         void syncWaOverlay().catch(() => {});
-      }, 3000);
+      }, 2000);
     }
   }
 
@@ -320,58 +369,9 @@
       .join("");
   }
 
-  function uniquePhoneKeysForGroup(group) {
-    const ids = group.contactIds || [];
-    const seen = new Set();
-    const keys = [];
-    if (group.fromWhatsApp === true) {
-      for (const id of ids) {
-        const s = String(id || "");
-        const key = digitsOnly(s.includes("@") ? s.split("@")[0] : s);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        keys.push(key);
-      }
-      return keys;
-    }
-    const byId = new Map(contacts.map((c) => [c.id, c]));
-    for (const id of ids) {
-      const c = byId.get(id);
-      const key = c ? digitsOnly(c.phone) : "";
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      keys.push(key);
-    }
-    return keys;
-  }
-
-  function memberCountForGroup(group) {
-    return uniquePhoneKeysForGroup(group).length;
-  }
-
   function memberNamesForGroup(group) {
     const ids = group.contactIds || [];
-    const seen = new Set();
-    const names = [];
-    if (group.fromWhatsApp === true) {
-      for (const id of ids) {
-        const s = String(id || "");
-        const key = digitsOnly(s.includes("@") ? s.split("@")[0] : s);
-        if (!key || seen.has(key)) continue;
-        seen.add(key);
-        names.push(displayParticipantName(id));
-      }
-      return names;
-    }
-    const byId = new Map(contacts.map((c) => [c.id, c]));
-    for (const id of ids) {
-      const c = byId.get(id);
-      const key = c ? digitsOnly(c.phone) : "";
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      names.push(c ? c.name : displayParticipantName(id));
-    }
-    return names;
+    return ids.map((id) => displayParticipantName(id));
   }
 
   function renderGroups() {
@@ -386,7 +386,7 @@
     }
     els.groupList.innerHTML = list
       .map((g) => {
-        const count = memberCountForGroup(g);
+        const count = (g.contactIds || []).length;
         const expanded = expandedGroupId === g.id;
         const names = memberNamesForGroup(g);
         const membersHtml =
@@ -436,7 +436,7 @@
       els.sendSelection.innerHTML = "<span>No group selected.</span> Go to <strong>Groups</strong> and tap <strong>Select</strong> on a group.";
       return;
     }
-    const n = memberCountForGroup(selectedGroup);
+    const n = (selectedGroup.contactIds || []).length;
     els.sendSelection.innerHTML = `Sending to <strong>${escapeHtml(selectedGroup.name)}</strong> — <strong>${n}</strong> recipient${n === 1 ? "" : "s"}.`;
   }
 
@@ -485,14 +485,15 @@
       els.groupModalSearch.value = "";
       els.groupModalSearch.disabled = contacts.length === 0;
     }
+    if (els.groupModalSelectAll) {
+      els.groupModalSelectAll.disabled = contacts.length === 0;
+    }
     if (els.groupModalHint) {
       els.groupModalHint.textContent =
         mode === "new"
-          ? "Search matches names from the start only (case-insensitive), e.g. \"spain\" or \"spain bir24\". Matches appear below and are selected automatically — uncheck anyone you do not want, enter a group name, then create."
+          ? "Search matches names from the start only (case-insensitive), e.g. \"spain\" or \"spain bir24\". Matches appear below — use Select all or check individuals, then create."
           : "Search filters by the start of each contact's name only (case-insensitive). Check or uncheck contacts to change who is in this group.";
     }
-    groupModalLastVisibleIds = new Set();
-    groupModalSearchHadQuery = false;
     if (groupModalSearchTimer !== null) {
       clearTimeout(groupModalSearchTimer);
       groupModalSearchTimer = null;
@@ -505,13 +506,29 @@
       els.groupModalSave.textContent = "Save changes";
     }
     const selected = new Set(group && group.contactIds ? group.contactIds : []);
+    const selectedPhones = new Set();
+    if (group && group.contactIds && group.contactIds.length > 0) {
+      const byId = new Map(contacts.map((c) => [c.id, c]));
+      for (const id of group.contactIds) {
+        const c = byId.get(id);
+        if (c) {
+          const p = digitsOnly(c.phone);
+          if (p) selectedPhones.add(p);
+        } else if (String(id).includes("@")) {
+          const p = digitsOnly(String(id).split("@")[0]);
+          if (p) selectedPhones.add(p);
+        }
+      }
+    }
     if (contacts.length === 0) {
       els.groupModalContacts.innerHTML = '<p class="empty-hint">Add contacts first.</p>';
     } else {
       const rowHidden = mode === "new" ? " hidden" : "";
-      els.groupModalContacts.innerHTML = contacts
+      els.groupModalContacts.innerHTML = contactsUniqueByPhone(contacts)
         .map((c) => {
-          const checked = selected.has(c.id) ? " checked" : "";
+          const phoneKey = digitsOnly(c.phone);
+          const checked =
+            selected.has(c.id) || (phoneKey && selectedPhones.has(phoneKey)) ? " checked" : "";
           return `<div class="modal-contact-row${rowHidden}" data-contact-id="${escapeAttr(c.id)}">
             <label class="check-row">
               <input type="checkbox" data-contact-id="${escapeAttr(c.id)}"${checked} />
@@ -537,8 +554,6 @@
     if (els.groupModalSearch) {
       els.groupModalSearch.value = "";
     }
-    groupModalLastVisibleIds = new Set();
-    groupModalSearchHadQuery = false;
     els.groupModal.classList.add("hidden");
     if (els.groupModalHint) {
       els.groupModalHint.textContent = "";
@@ -549,17 +564,23 @@
 
   function getModalSelectedContactIds() {
     const boxes = els.groupModalContacts.querySelectorAll('input[type="checkbox"][data-contact-id]');
-    const ids = [];
-    const seenPhones = new Set();
     const byId = new Map(contacts.map((c) => [c.id, c]));
+    const seenPhones = new Set();
+    const ids = [];
     boxes.forEach((input) => {
       if (!input.checked) return;
       const id = input.getAttribute("data-contact-id");
       if (!id) return;
       const c = byId.get(id);
-      const phone = c ? digitsOnly(c.phone) : "";
-      if (phone && seenPhones.has(phone)) return;
-      if (phone) seenPhones.add(phone);
+      const phoneKey = c
+        ? digitsOnly(c.phone)
+        : id.includes("@")
+          ? digitsOnly(id.split("@")[0])
+          : "";
+      if (phoneKey) {
+        if (seenPhones.has(phoneKey)) return;
+        seenPhones.add(phoneKey);
+      }
       ids.push(id);
     });
     return ids;
@@ -584,22 +605,12 @@
       rows.forEach((row) => {
         if (groupModalMode === "new") {
           row.classList.add("hidden");
-          const input = row.querySelector("input[type=checkbox]");
-          if (input) input.checked = false;
         } else {
           row.classList.remove("hidden");
-          if (groupModalSearchHadQuery) {
-            const input = row.querySelector("input[type=checkbox]");
-            if (input) input.checked = false;
-          }
         }
       });
-      groupModalSearchHadQuery = false;
-      groupModalLastVisibleIds = new Set();
       return;
     }
-
-    groupModalSearchHadQuery = true;
 
     const matchedIds = new Set(
       contacts.filter((c) => matchesGroupModalNamePrefix(c, q)).map((c) => c.id)
@@ -610,41 +621,34 @@
       rows.forEach((row) => {
         if (groupModalMode === "new") {
           row.classList.add("hidden");
-          const input = row.querySelector("input[type=checkbox]");
-          if (input) input.checked = false;
         } else {
           row.classList.remove("hidden");
-          if (groupModalSearchHadQuery) {
-            const input = row.querySelector("input[type=checkbox]");
-            if (input) input.checked = false;
-          }
         }
       });
-      groupModalSearchHadQuery = false;
-      groupModalLastVisibleIds = new Set();
       return;
     }
 
-    const visibleIds = new Set();
     rows.forEach((row) => {
       const id = row.getAttribute("data-contact-id");
       if (!id) return;
-      const show = matchedIds.has(id);
-      row.classList.toggle("hidden", !show);
-      if (show) visibleIds.add(id);
+      row.classList.toggle("hidden", !matchedIds.has(id));
     });
+  }
 
-    visibleIds.forEach((id) => {
-      if (groupModalLastVisibleIds.has(id)) return;
-      rows.forEach((row) => {
-        if (row.getAttribute("data-contact-id") === id) {
-          const input = row.querySelector("input[type=checkbox]");
-          if (input) input.checked = true;
-        }
-      });
+  function selectAllVisibleGroupModalContacts() {
+    if (!els.groupModalSearch || !els.groupModalSearch.value.trim()) {
+      alert("Enter a search term first — Select all applies to the current matches.");
+      return;
+    }
+    const rows = els.groupModalContacts.querySelectorAll(".modal-contact-row:not(.hidden)");
+    if (rows.length === 0) {
+      alert("No contacts match your search.");
+      return;
+    }
+    rows.forEach((row) => {
+      const input = row.querySelector("input[type=checkbox]");
+      if (input) input.checked = true;
     });
-
-    groupModalLastVisibleIds = visibleIds;
   }
 
   function scheduleGroupModalSearch() {
@@ -794,7 +798,7 @@
       const r = await apiJson("/api/sync", { method: "POST" });
       const c = typeof r.contacts === "number" ? r.contacts : 0;
       const g = typeof r.groups === "number" ? r.groups : 0;
-      showToast(`Synced ${c} contacts and ${g} groups`, "info");
+      showToast(`Synced ${c} contacts (${g} tool group${g === 1 ? "" : "s"})`, "info");
       await refreshAll();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Sync failed.");
@@ -807,6 +811,71 @@
   if (els.syncWaBtn) {
     els.syncWaBtn.addEventListener("click", () => {
       void runManualSync();
+    });
+  }
+
+  async function runClearCache() {
+    if (!els.clearCacheBtn) return;
+    if (
+      !confirm(
+        "Clear the WhatsApp Web cache (.wwebjs_cache)?\n\nStop any broadcast first. After clearing, restart the server with npm start, then sync again."
+      )
+    ) {
+      return;
+    }
+    els.clearCacheBtn.disabled = true;
+    try {
+      const r = await apiJson("/api/cache/clear", { method: "POST" });
+      const msg =
+        r && typeof r.message === "string"
+          ? r.message
+          : "Cache cleared. Restart the server, then sync again.";
+      showToast(msg, "info");
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Clear cache failed", "error");
+    } finally {
+      els.clearCacheBtn.disabled = false;
+    }
+  }
+
+  async function runClearSyncedContacts() {
+    if (!els.clearSyncedContactsBtn) return;
+    if (sendInFlight) {
+      alert("Stop the current broadcast before clearing contacts.");
+      return;
+    }
+    if (
+      !confirm(
+        "Remove all contacts imported from WhatsApp?\n\nManual contacts stay. Groups keep manual members only. You can sync from WhatsApp again afterward."
+      )
+    ) {
+      return;
+    }
+    els.clearSyncedContactsBtn.disabled = true;
+    try {
+      const r = await apiJson("/api/contacts/clear-synced", { method: "POST" });
+      const removed = typeof r.removed === "number" ? r.removed : 0;
+      showToast(`Removed ${removed} synced contact${removed === 1 ? "" : "s"}`, "info");
+      await refreshAll();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : "Clear synced contacts failed",
+        "error"
+      );
+    } finally {
+      els.clearSyncedContactsBtn.disabled = false;
+    }
+  }
+
+  if (els.clearCacheBtn) {
+    els.clearCacheBtn.addEventListener("click", () => {
+      void runClearCache();
+    });
+  }
+
+  if (els.clearSyncedContactsBtn) {
+    els.clearSyncedContactsBtn.addEventListener("click", () => {
+      void runClearSyncedContacts();
     });
   }
 
@@ -875,6 +944,10 @@
     els.groupModalSearch.addEventListener("input", scheduleGroupModalSearch);
   }
 
+  if (els.groupModalSelectAll) {
+    els.groupModalSelectAll.addEventListener("click", selectAllVisibleGroupModalContacts);
+  }
+
   els.groupModal.addEventListener("click", (e) => {
     if (e.target.closest("[data-modal-close]")) closeGroupModal();
   });
@@ -887,7 +960,7 @@
     }
     const contactIds = getModalSelectedContactIds();
     if (groupModalMode === "new" && contactIds.length === 0) {
-      alert("Select at least one contact. Use the search box to find people, then create the group.");
+      alert("Select at least one contact. Search, tap Select all (or check boxes), then create the group.");
       return;
     }
     try {
@@ -951,11 +1024,11 @@
     if (!selectedGroup || !els.sendMessage.value.trim() || sendInFlight) return;
 
     const message = els.sendMessage.value.trim();
-    const delaySeconds = Number(els.sendDelay.value);
+    const delayRange = String(els.sendDelay.value || "").trim();
     const body = JSON.stringify({
       groupId: selectedGroup.id,
       message,
-      delaySeconds,
+      delayRange,
     });
 
     sendUserStopped = false;
@@ -1004,15 +1077,13 @@
   });
 
   async function boot() {
-    try {
-      await initWaConnection();
-    } catch {
-      els.mainUi.classList.remove("main-ui-hidden");
-    }
+    await initWaConnection();
     try {
       await refreshAll();
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Failed to load data.");
+      if (lastWaReady) {
+        alert(err instanceof Error ? err.message : "Failed to load data.");
+      }
     }
   }
 

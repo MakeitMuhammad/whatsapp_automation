@@ -57,10 +57,41 @@ body {
 }
 
 .wa-qr-title {
-  margin: 0 0 16px;
+  margin: 0 0 8px;
   font-size: 1rem;
   font-weight: 600;
   color: var(--text);
+}
+
+.wa-qr-hint {
+  margin: 0 0 16px;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.wa-qr-spinner {
+  width: 40px;
+  height: 40px;
+  margin: 8px auto 16px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: wa-spin 0.9s linear infinite;
+}
+
+.wa-qr-spinner.hidden {
+  display: none;
+}
+
+@keyframes wa-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.wa-qr-img.hidden {
+  display: none;
 }
 
 .wa-qr-img {
@@ -227,6 +258,10 @@ body {
 .row-actions {
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.row-actions-maintenance {
+  margin-top: 4px;
 }
 
 #sync-wa-btn {
@@ -617,6 +652,17 @@ body {
   margin-bottom: env(safe-area-inset-bottom, 0);
   transform: translateY(12px);
   transition: transform var(--transition);
+}
+
+.modal-search-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: stretch;
+}
+
+.modal-search-row .input {
+  flex: 1;
+  min-width: 0;
 }
 
 .modal-hint {

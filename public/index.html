@@ -7,14 +7,16 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div id="wa-qr-overlay" class="wa-qr-overlay hidden" aria-hidden="true">
+    <div id="wa-qr-overlay" class="wa-qr-overlay" aria-hidden="false">
       <div class="wa-qr-card surface">
-        <p class="wa-qr-title">Scan this QR code in WhatsApp on your phone</p>
-        <img id="wa-qr-img" class="wa-qr-img" src="" alt="WhatsApp QR code" width="256" height="256" />
+        <p id="wa-qr-title" class="wa-qr-title">Starting WhatsApp…</p>
+        <p id="wa-qr-hint" class="wa-qr-hint">Open this page at <strong>http://localhost:3000</strong> (not as a file).</p>
+        <div id="wa-qr-spinner" class="wa-qr-spinner" aria-hidden="false"></div>
+        <img id="wa-qr-img" class="wa-qr-img hidden" src="" alt="WhatsApp QR code" width="256" height="256" />
       </div>
     </div>
 
-    <div id="main-ui" class="main-ui">
+    <div id="main-ui" class="main-ui main-ui-hidden">
     <div class="app">
       <nav class="tabs" role="tablist" aria-label="Main">
         <button type="button" class="tab active" data-tab="contacts" role="tab" aria-selected="true">
@@ -57,6 +59,14 @@
                 <span class="btn-label">Sync from WhatsApp</span>
               </button>
             </div>
+            <div class="row row-actions row-actions-maintenance">
+              <button type="button" id="clear-cache-btn" class="btn btn-secondary btn-sm">
+                Clear cache
+              </button>
+              <button type="button" id="clear-synced-contacts-btn" class="btn btn-secondary btn-sm">
+                Clear synced contacts
+              </button>
+            </div>
           </div>
         </section>
 
@@ -76,17 +86,12 @@
             <label class="field-label" for="send-message">Message</label>
             <textarea id="send-message" class="input textarea" rows="6" placeholder="Type your message…"></textarea>
             <div class="char-count"><span id="char-count">0</span> characters</div>
-            <label class="field-label" for="send-delay">Delay between messages (seconds)</label>
+            <label class="field-label" for="send-delay">Delay between messages (random seconds)</label>
             <select id="send-delay" class="input">
-              <option value="2">2</option>
-              <option value="3" selected>3</option>
-              <option value="4">4</option>
-              <option value="5">5</option>
-              <option value="6">6</option>
-              <option value="7">7</option>
-              <option value="8">8</option>
-              <option value="9">9</option>
-              <option value="10">10</option>
+              <option value="10-15" selected>10-15 seconds</option>
+              <option value="15-20">15-20 seconds</option>
+              <option value="20-30">20-30 seconds</option>
+              <option value="30-45">30-45 seconds</option>
             </select>
             <button type="button" id="send-btn" class="btn btn-primary" disabled>Send to group</button>
 
@@ -108,14 +113,19 @@
       <div class="modal-card surface">
         <h2 id="group-modal-title" class="modal-title">Create group</h2>
         <label class="field-label" for="group-modal-search">Search contacts</label>
-        <input
-          id="group-modal-search"
-          type="search"
-          class="input"
-          placeholder="Name starts with…"
-          autocomplete="off"
-          disabled
-        />
+        <div class="modal-search-row">
+          <input
+            id="group-modal-search"
+            type="search"
+            class="input"
+            placeholder="Name starts with…"
+            autocomplete="off"
+            disabled
+          />
+          <button type="button" id="group-modal-select-all" class="btn btn-secondary" disabled>
+            Select all
+          </button>
+        </div>
         <p id="group-modal-hint" class="modal-hint"></p>
         <label class="field-label" for="group-modal-name">Group name</label>
         <input id="group-modal-name" type="text" class="input" placeholder="Group name" />
